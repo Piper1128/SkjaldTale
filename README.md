@@ -15,14 +15,17 @@ ingen skjult magi. Alt er læsbart og annoteret på dansk.
 SkjaldTale/
 ├── nanollm/                        # selve pakken  (import: from nanollm import ...)
 │   ├── __init__.py                 # GPT, GPTConfig, BPETokenizer, generate
-│   ├── tokenizer.py                # byte-level BPE fra bunden (train / encode / decode)
+│   ├── tokenizer.py                # byte-level BPE (train / encode / decode / save / load)
 │   ├── model.py                    # decoder-only GPT + GPTConfig, med KV-cache i attention
 │   └── generate.py                 # autoregressiv sampling: temperature / top_k / top_p
 ├── scripts/
-│   ├── train.py                    # end-to-end: træn BPE -> træn GPT -> generér
+│   ├── prepare_data.py             # hent et saga-korpus (sagadb.org) -> data/corpus.txt
+│   ├── train.py                    # træn på indbygget demo ELLER --data dit eget korpus
+│   ├── sample.py                   # indlæs et checkpoint og generér / tal med modellen
 │   └── finetune_lora.py            # LoRA: finetune uden at røre basis-vægtene
-└── tests/
-    └── test_cache_equivalence.py   # KV-cache skal matche fuld forward ved temperature=0
+├── tests/
+│   └── test_cache_equivalence.py   # KV-cache skal matche fuld forward ved temperature=0
+└── data/                           # korpora (hentes lokalt, committes ikke)
 ```
 
 ## Kør det
@@ -41,6 +44,35 @@ python tests/test_cache_equivalence.py        # eller: pytest
 ```
 
 Kræver kun `torch` (>= 2.0 for `scaled_dot_product_attention`). CPU er nok til nano-skala.
+
+## Træn på dit eget korpus (fx oldnordiske sagaer)
+
+```bash
+# 1) hent et saga-korpus (oldnordisk .on) -> data/corpus.txt
+python scripts/prepare_data.py
+
+# 2) træn en skaleret model og gem den
+python scripts/train.py --data data/corpus.txt --save-dir runs/skjald
+
+# 3) tal med den (tekst-fortsættelse i saga-stil)
+python scripts/sample.py --load-dir runs/skjald --prompt "Þat var einn morgin"
+```
+
+`prepare_data.py` vælger sprog med `--langs`: `on` (oldnordisk, default), `is`
+(moderne islandsk), `da` (dansk), `en` (engelsk). Byte-level-tokenizeren koder
+þ/ð/ǫ/æ gratis. `train.py` uden `--data` kører stadig den lille indbyggede demo.
+
+## Vejkort: fra saga-stil til samtale
+
+Vær ærlig om skalaen — der gemmer sig to forskellige mål:
+
+- **Fortælle saga-*stil*** — opnåeligt her. En nano-model lærer sagaernes stil og
+  stavemønstre og genererer overbevisende-udseende fragmenter (uden global sammenhæng).
+- **Svare på spørgsmål som en skjald** — kræver verdensviden + instruktionsfølgning,
+  der først opstår ved *milliarder* af parametre. Vejen dertil er **ikke** at træne
+  denne model større, men at **LoRA-finetune en eksisterende lille pretrained model**
+  (fx SmolLM2 / Qwen2.5-0.5B) på et saga-korpus + spørgsmål/svar-par — præcis teknikken
+  i [`scripts/finetune_lora.py`](scripts/finetune_lora.py), bragt i rigtig skala.
 
 ## Datastrømmen (kort)
 
