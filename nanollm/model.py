@@ -64,9 +64,16 @@ class CausalSelfAttention(nn.Module):
                 v = torch.cat([cache["v"], v], dim=2)
             cache["k"], cache["v"] = k, v
 
-        # Causal maske er kun nødvendig når vi behandler >1 token (træning/prefill).
-        # Ved ét-token-decode ser den nye position lovligt hele fortiden.
-        is_causal = cache is None and T > 1
+        # Causal maske er nødvendig når vi behandler >1 token AD GANGEN — det
+        # gælder både træning OG prefill af en prompt (som har en frisk, tom
+        # cache men stadig er fler-token). Ved ét-token-decode (T==1) ser den
+        # nye position lovligt hele den cachede fortid, så masken er unødvendig.
+        #
+        # BEMÆRK: 'cache is not None' må IKKE indgå i betingelsen. Gør den det,
+        # slås masken fra under prefill, og prompt-tokens attender bidirektionelt
+        # (token 3 ser token 7). Det forurener de dybe lags KV-cache og får
+        # cache-generering til at afvige fra den fulde forward. Kun 'T > 1'.
+        is_causal = T > 1
         y = F.scaled_dot_product_attention(
             q, k, v,
             dropout_p=self.attn_drop.p if self.training else 0.0,
