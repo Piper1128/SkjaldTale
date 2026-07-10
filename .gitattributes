@@ -1,0 +1,2 @@
+# Normalisér linjeendelser: gem som LF i repo'et, tjek ud som LF overalt.
+* text=auto eol=lf
