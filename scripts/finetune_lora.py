@@ -57,6 +57,15 @@ def main():
     cfg = GPTConfig(vocab_size=512, block_size=64, n_layer=4, n_head=4, n_embd=128)
     model = GPT(cfg).to(device)
 
+    # Frys HELE basismodellen først — embeddings, positions-embeddings, alle
+    # layernorms OG den vægtdelte lm_head. LoRA-adapterne (A/B) oprettes bagefter
+    # af inject_lora og er derfor de eneste parametre med requires_grad=True.
+    # Uden dette ville optimeren også opdatere embeddings/LN/lm_head (og dermed
+    # "røre" basisvægtene, stik imod hele idéen) og oppuste den viste andel af
+    # trænbare parametre.
+    for p in model.parameters():
+        p.requires_grad = False
+
     # Gem en reference til en basisvægt, så vi kan bevise den ikke ændrer sig.
     ref = model.blocks[0].attn.qkv.weight.detach().clone()
 
