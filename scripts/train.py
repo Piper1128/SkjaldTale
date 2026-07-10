@@ -1,26 +1,35 @@
 """
-train.py — hele kæden i ét kørsel.
+train.py — træn en nano-GPT ende-til-ende.
 
-    1. Træn en BPE-tokenizer på et korpus
-    2. Kod korpus til tokens, split i train/val
-    3. Træn en nano-GPT på next-token-forudsigelse
-    4. Generér tekst fra den trænede model
+Uden argumenter: en lille selvstændig demo på et indbygget stoisk korpus
+(kører på ~1 min CPU) — uændret fra før.
 
-Kør:  python scripts/train.py
+Med --data: træn på din egen tekstfil (fx et saga-korpus fra prepare_data.py)
+og skalér op. Gemte checkpoints kan samples med scripts/sample.py.
+
+    python scripts/prepare_data.py                       # -> data/corpus.txt (oldnordisk)
+    python scripts/train.py --data data/corpus.txt --save-dir runs/skjald
+
+    # større/bedre (længere træning — gerne mange steps):
+    python scripts/train.py --data data/corpus.txt \
+        --vocab-size 4000 --block-size 256 --n-layer 6 --n-embd 256 \
+        --steps 5000 --batch-size 32 --save-dir runs/skjald
 """
+import argparse
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Gør stdout robust over for ikke-ASCII (oldnordisk þ/ð/ǫ/æ) på Windows-konsoller.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 import torch
 from nanollm import GPT, GPTConfig, BPETokenizer, generate
 
-# --- korpus ---------------------------------------------------------------
-# Vigtigt: variation. Et perfekt-periodisk korpus (samme sætning gentaget)
-# kollapser BPE til nogle få kæmpe-tokens, og så er der intet at træne på.
-# Mange forskellige sætninger holder token-strømmen lang og lærbar.
+# Indbygget mini-korpus (fallback når --data ikke gives): 26 stoiske citater.
 _SENTENCES = [
     "Du har magt over dit sind, ikke over ydre begivenheder.",
     "Indse dette, og du vil finde styrke.",
@@ -50,21 +59,16 @@ _SENTENCES = [
     "Alt hvad vi ser er et perspektiv, ikke sandheden.",
 ]
 
-import random as _r
-_r.seed(0)
-_pool = []
-for _ in range(80):
-    _shuffled = _SENTENCES[:]
-    _r.shuffle(_shuffled)
-    _pool.extend(_shuffled)
-CORPUS = " ".join(_pool) + " "
 
-VOCAB_SIZE = 512
-BLOCK_SIZE = 128
-BATCH_SIZE = 32
-STEPS = 400
-LR = 3e-3
-EVAL_EVERY = 100
+def builtin_corpus():
+    import random as _r
+    _r.seed(0)
+    pool = []
+    for _ in range(80):
+        s = _SENTENCES[:]
+        _r.shuffle(s)
+        pool.extend(s)
+    return " ".join(pool) + " "
 
 
 def get_batch(data, block_size, batch_size, device):
@@ -75,66 +79,122 @@ def get_batch(data, block_size, batch_size, device):
 
 
 @torch.no_grad()
-def eval_loss(model, data, cfg, device, iters=20):
+def eval_loss(model, data, block_size, batch_size, device, iters=20):
     model.eval()
     losses = []
     for _ in range(iters):
-        x, y = get_batch(data, cfg.block_size, BATCH_SIZE, device)
+        x, y = get_batch(data, block_size, batch_size, device)
         _, loss = model(x, targets=y)
         losses.append(loss.item())
     model.train()
     return sum(losses) / len(losses)
 
 
+def save_checkpoint(save_dir, model, tok, cfg):
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save({"model": model.state_dict(), "config": vars(cfg)},
+               os.path.join(save_dir, "model.pt"))
+    tok.save(os.path.join(save_dir, "tokenizer.json"))
+    print(f"Gemte checkpoint i {save_dir}/ (model.pt + tokenizer.json)")
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Træn nano-GPT (SkjaldTale).")
+    p.add_argument("--data", help="sti til .txt korpus (ellers indbygget stoisk demo)")
+    p.add_argument("--vocab-size", type=int)
+    p.add_argument("--block-size", type=int)
+    p.add_argument("--n-layer", type=int)
+    p.add_argument("--n-head", type=int, default=4)
+    p.add_argument("--n-embd", type=int)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--steps", type=int)
+    p.add_argument("--lr", type=float, default=3e-3)
+    p.add_argument("--dropout", type=float, default=0.0)
+    p.add_argument("--eval-every", type=int, default=100)
+    p.add_argument("--prompt", default=None)
+    p.add_argument("--save-dir", default=None)
+    p.add_argument("--seed", type=int, default=1337)
+    return p.parse_args()
+
+
 def main():
-    torch.manual_seed(1337)
+    args = parse_args()
+    torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Enhed: {device}\n")
+
+    saga = args.data is not None
+    if saga:
+        with open(args.data, encoding="utf-8") as f:
+            corpus = f.read()
+    else:
+        corpus = builtin_corpus()
+
+    # Adaptive defaults: lille til demo, større når man træner på egen data.
+    vocab_size = args.vocab_size or (4000 if saga else 512)
+    block_size = args.block_size or (256 if saga else 128)
+    n_layer = args.n_layer or (6 if saga else 4)
+    n_embd = args.n_embd or (256 if saga else 128)
+    steps = args.steps or (5000 if saga else 400)
+    prompt = args.prompt if args.prompt is not None else (
+        "Þat var einn morgin" if saga else "Du har magt")
+
+    print(f"Enhed: {device}")
+    print(f"Korpus: {len(corpus):,} tegn "
+          f"({'fil ' + args.data if saga else 'indbygget demo'})\n")
 
     # 1. tokenizer
     tok = BPETokenizer()
-    tok.train(CORPUS, vocab_size=VOCAB_SIZE)
-    ids = tok.encode(CORPUS)
-    ratio = len(CORPUS.encode("utf-8")) / len(ids)
+    tok.train(corpus, vocab_size=vocab_size)
+    ids = tok.encode(corpus)
+    ratio = len(corpus.encode("utf-8")) / len(ids)
     print(f"Tokenizer: {len(tok.merges)} merges, vocab={tok.vocab_size}")
-    print(f"Korpus: {len(CORPUS)} tegn -> {len(ids)} tokens "
+    print(f"  {len(corpus):,} tegn -> {len(ids):,} tokens "
           f"(komprimering {ratio:.2f}x)\n")
 
     # 2. data-split
     data = torch.tensor(ids, dtype=torch.long)
     n = int(0.9 * len(data))
     train_data, val_data = data[:n], data[n:]
+    if len(val_data) <= block_size:
+        sys.exit("Korpus for lille til dette block-size — brug mere data "
+                 "eller et mindre --block-size.")
 
     # 3. model
-    cfg = GPTConfig(vocab_size=tok.vocab_size, block_size=BLOCK_SIZE,
-                    n_layer=4, n_head=4, n_embd=128, dropout=0.0)
+    cfg = GPTConfig(vocab_size=tok.vocab_size, block_size=block_size,
+                    n_layer=n_layer, n_head=args.n_head, n_embd=n_embd,
+                    dropout=args.dropout)
     model = GPT(cfg).to(device)
     print(f"Model: {model.num_params():,} parametre "
-          f"({cfg.n_layer} lag, {cfg.n_head} hoveder, d={cfg.n_embd})\n")
+          f"({cfg.n_layer} lag, {cfg.n_head} hoveder, d={cfg.n_embd}, "
+          f"kontekst={cfg.block_size})\n")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=LR)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     # 4. træn
-    print("Træner...")
+    print(f"Træner {steps} steps...")
     t0 = time.time()
-    for step in range(1, STEPS + 1):
-        x, y = get_batch(train_data, cfg.block_size, BATCH_SIZE, device)
+    for step in range(1, steps + 1):
+        x, y = get_batch(train_data, block_size, args.batch_size, device)
         _, loss = model(x, targets=y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
-        if step % EVAL_EVERY == 0 or step == 1:
-            vl = eval_loss(model, val_data, cfg, device)
-            print(f"  step {step:4d}  train {loss.item():.3f}  val {vl:.3f}")
+        if step % args.eval_every == 0 or step == 1:
+            vl = eval_loss(model, val_data, block_size, args.batch_size, device)
+            print(f"  step {step:5d}  train {loss.item():.3f}  val {vl:.3f}  "
+                  f"({time.time() - t0:.0f}s)")
     print(f"Færdig på {time.time() - t0:.1f}s\n")
 
-    # 5. generér
-    prompt = "Du har magt"
+    # 5. gem
+    if args.save_dir:
+        save_checkpoint(args.save_dir, model, tok, cfg)
+
+    # 6. generér
     idx = torch.tensor([tok.encode(prompt)], dtype=torch.long, device=device)
-    out = generate(model, idx, max_new_tokens=120,
+    out = generate(model, idx, max_new_tokens=200,
                    temperature=0.8, top_k=40, use_cache=True)
-    print("Generering (temp=0.8, top_k=40):")
+    print(f"\nGenerering (prompt={prompt!r}, temp=0.8, top_k=40):")
     print("  " + tok.decode(out[0].tolist()).replace("\n", " "))
 
 
