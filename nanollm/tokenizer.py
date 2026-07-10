@@ -15,6 +15,8 @@ To faser:
 """
 from __future__ import annotations
 
+import json
+
 
 def get_stats(ids: list[int], counts: dict | None = None) -> dict:
     """Tæl alle nabopar. [1,2,1,2,3] -> {(1,2):2, (2,1):1, (2,3):1}."""
@@ -87,3 +89,22 @@ class BPETokenizer:
     @property
     def vocab_size(self) -> int:
         return len(self.vocab)
+
+    # -- persistens ---------------------------------------------------------
+    def save(self, path: str) -> None:
+        """Gem merges til JSON — nok til at genskabe hele tokenizeren."""
+        merges = [[list(pair), idx] for pair, idx in self.merges.items()]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"merges": merges}, f, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, path: str) -> "BPETokenizer":
+        """Genskab en tokenizer fra gemt JSON ved at afspille merges i id-rækkefølge."""
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        tok = cls()
+        tok.merges = {tuple(pair): idx for pair, idx in data["merges"]}
+        for pair, idx in sorted(tok.merges.items(), key=lambda kv: kv[1]):
+            # pair[0] og pair[1] har altid lavere id end idx, så de findes allerede.
+            tok.vocab[idx] = tok.vocab[pair[0]] + tok.vocab[pair[1]]
+        return tok
