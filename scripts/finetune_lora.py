@@ -66,11 +66,17 @@ def main():
     for p in model.parameters():
         p.requires_grad = False
 
-    # Gem en reference til en basisvægt, så vi kan bevise den ikke ændrer sig.
-    ref = model.blocks[0].attn.qkv.weight.detach().clone()
-
     replaced = inject_lora(model, r=8, alpha=16)
     model.to(device)
+
+    # Bevis at KUN A/B trænes. Ét tjek på én basisvægt er for svagt: LoRALinear
+    # fryser selv sin base, så det tjek forbliver grønt selv hvis den globale
+    # frys ovenfor fjernes (embeddings/LN/lm_head træner så med). Tjek i stedet
+    # (1) at alle trænbare parametre er A/B, og (2) at HELE resten står stille.
+    trainable_names = [n for n, p in model.named_parameters() if p.requires_grad]
+    non_lora = [n for n in trainable_names if not n.endswith((".A", ".B"))]
+    ref = {n: p.detach().clone() for n, p in model.named_parameters()
+           if not n.endswith((".A", ".B"))}
 
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -93,10 +99,14 @@ def main():
         if step % 20 == 0:
             print(f"  step {step:2d}  loss {loss.item():.3f}")
 
-    now = model.blocks[0].attn.qkv.base.weight
-    unchanged = torch.equal(ref, now)
-    print(f"\nBasisvægt uændret efter træning: {unchanged} "
-          f"(kun A/B blev opdateret)")
+    changed = [n for n, p in model.named_parameters()
+               if n in ref and not torch.equal(ref[n], p)]
+    print(f"\nTrænbare ikke-A/B-parametre: {len(non_lora)}  "
+          f"Ændrede basisparametre: {len(changed)} af {len(ref)}")
+    if non_lora or changed:
+        sys.exit(f"FEJL: basen blev rørt — trænbare: {non_lora[:3]} "
+                 f"ændrede: {changed[:3]}")
+    print("OK — kun A/B blev opdateret; alle basisparametre er uændrede")
 
 
 if __name__ == "__main__":
