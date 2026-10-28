@@ -39,7 +39,7 @@ python scripts/train.py
 # LoRA-demo: frys basis-vægtene, træn kun lav-rang-adapterne A og B
 python scripts/finetune_lora.py
 
-# Regressionstest: cache-stien skal matche den fulde forward token-for-token
+# Regressionstest: cache-stien skal matche den fulde forward — tokens OG logits pr. trin
 python tests/test_cache_equivalence.py        # eller: pytest
 ```
 
